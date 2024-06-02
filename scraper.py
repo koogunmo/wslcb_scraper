@@ -60,22 +60,25 @@ def create_collections_and_indexes():
         logging.error(f"Error creating collections or indexes: {e}")
 
 def geocode_addresses_batch(addresses):
-    logging.debug(f"Geocoding {len(addresses)} addresses using batch API...")
+    logging.debug(f"Geocoding {len(addresses)} addresses...")
 
-    # Check if addresses already exist in the cache
+    # Batch check if addresses already exist in the cache
+    cache_lookup_operations = [q.get(q.match(q.index("geocode_cache_by_address"), address)) for address in addresses]
+
     existing_results = {}
-    for address in addresses:
-        try:
-            result = fauna_client.query(q.get(q.match(q.index("geocode_cache_by_address"), address)))
-            existing_results[address] = (
-                result['data']['latitude'],
-                result['data']['longitude'],
-                result['data']['geohash'],
-                result['data']['zipcode'],
-                result['data']['formatted_address']
-            )
-        except:
-            continue
+    try:
+        cache_results = fauna_client.query(q.map_(lambda x: x, cache_lookup_operations))
+        for address, result in zip(addresses, cache_results):
+            if result:
+                existing_results[address] = (
+                    result['data']['latitude'],
+                    result['data']['longitude'],
+                    result['data']['geohash'],
+                    result['data']['zipcode'],
+                    result['data']['formatted_address']
+                )
+    except Exception as e:
+        logging.error(f"Error checking cache for addresses: {e}")
 
     # Addresses to geocode via API
     addresses_to_geocode = [address for address in addresses if address not in existing_results]
@@ -108,7 +111,8 @@ def geocode_addresses_batch(addresses):
                     }))
                 except Exception as e:
                     logging.error(f"Error caching geocode data for address {address}: {e}")
-    logging.debug(existing_results)
+    else:
+        logging.debug("All addresses found in the cache")
     return existing_results
 
 def fetch_webpage():
@@ -147,9 +151,12 @@ def upsert_data(data, geocode_results):
         lat, lng, geohash_code, zipcode, formatted_address = geocode_results.get(address, (None, None, None, None, None))
         notification_date = get_notification_date(entry)
 
+        # Ensure notification_date is a string if it's not None
+        notification_date_str = notification_date.strftime('%Y-%m-%d') if notification_date else None
+
         # Prepare the document
         license_data = {
-            "notification_date": q.date(notification_date.strftime('%Y-%m-%d')),
+            "notification_date": notification_date_str,  # Use the string format
             "current_business_name": entry.get('Current Business Name'),
             "new_business_name": entry.get('New Business Name'),
             "business_location": entry.get('Business Location') or entry.get('New Business Location'),
@@ -169,7 +176,7 @@ def upsert_data(data, geocode_results):
             "business_name": entry.get('Business Name'),
             "applicants": entry.get('Applicant(s)'),
         }
-        logging.debug(license_data);
+        #logging.debug(license_data)
         # Upsert in FaunaDB
         try:
             fauna_client.query(q.if_(
@@ -178,9 +185,10 @@ def upsert_data(data, geocode_results):
                 q.create(q.collection("licenses"), {"data": license_data})
             ))
         except Exception as e:
-            logging.error(f"Error upserting data for license number {entry.get('License Number')}: {e}")
+            logging.error(f"Error upserting data for license number {entry.get('License Number')}: {e}. data: {license_data}")
 
     logging.debug("Data upsertion completed.")
+
 
 def main(limit):
     html_content = fetch_webpage()
