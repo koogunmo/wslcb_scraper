@@ -2,8 +2,8 @@ name: Scrape WSLCB Data
 
 on:
   schedule:
-    - cron: "0 14 * * *" # Runs every day at midnight
-  workflow_dispatch: # Allows manual trigger
+    - cron: "0 14 * * 1-6"
+  workflow_dispatch:
 
 jobs:
   scrape:
@@ -26,10 +26,6 @@ jobs:
       - name: Run Scraper Script
         env:
           GEOCODIO_API_KEY: ${{ secrets.GEOCODIO_API_KEY }}
+          FAUNADB_SECRET: ${{ secrets.FAUNADB_SECRET }}
         run: |
           python scraper.py
-          git config user.name github-actions
-          git config user.email github-actions@github.com
-          git add .
-          git commit --allow-empty -m "WSLCB update"
-          git push
