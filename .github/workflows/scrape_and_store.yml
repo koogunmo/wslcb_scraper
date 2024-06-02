@@ -2,7 +2,7 @@ name: Scrape WSLCB Data
 
 on:
   schedule:
-    - cron: "0 0 * * *" # Runs every day at midnight
+    - cron: "0 14 * * *" # Runs every day at midnight
   workflow_dispatch: # Allows manual trigger
 
 jobs:

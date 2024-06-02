@@ -1,5 +1,5 @@
 requests
 beautifulsoup4
-sqlite-utils
 pygeocodio
 geohash2
+faunadb
