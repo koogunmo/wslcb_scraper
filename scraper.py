@@ -26,70 +26,41 @@ if not xata_api_key or not xata_db_url:
     raise ValueError("Xata API key or database URL not found. Set them as environment variables 'XATA_API_KEY' and 'XATA_DB_URL'")
 xata_client = XataClient(api_key=xata_api_key, db_url=xata_db_url)
 
-def create_schema():
-    try:
-        # Create 'licenses' table
-        xata_client.tables().create("Licenses", {
-            "columns": [
-                {"name": "notification_date", "type": "datetime"},
-                {"name": "current_business_name", "type": "string"},
-                {"name": "new_business_name", "type": "string"},
-                {"name": "business_location", "type": "string"},
-                {"name": "current_applicants", "type": "string"},
-                {"name": "new_applicants", "type": "string"},
-                {"name": "license_type", "type": "string"},
-                {"name": "application_type", "type": "string"},
-                {"name": "license_number", "type": "string"},
-                {"name": "contact_phone", "type": "string"},
-                {"name": "latitude", "type": "float"},
-                {"name": "longitude", "type": "float"},
-                {"name": "geohash", "type": "string"},
-                {"name": "zipcode", "type": "string"},
-                {"name": "formatted_address", "type": "string"},
-                {"name": "business_name", "type": "string"},
-                {"name": "applicants", "type": "string"}
-            ]
-        })
-
-        # Create 'geocode_cache' table with 'address' as the primary key
-        xata_client.tables().create("geocode_cache", {
-            "columns": [
-                {"name": "address", "type": "string"},
-                {"name": "latitude", "type": "float"},
-                {"name": "longitude", "type": "float"},
-                {"name": "geohash", "type": "string"},
-                {"name": "zipcode", "type": "string"},
-                {"name": "formatted_address", "type": "string"}
-            ],
-            "primary_key": "address"
-        })
-
-        logging.info("Schema created successfully")
-    except Exception as e:
-        logging.error(f"Error creating schema: {e}")
-
 def geocode_addresses_batch(addresses):
     logging.debug(f"Geocoding {len(addresses)} addresses...")
 
-    existing_results = {}
-    for address in addresses:
-        try:
-            cache_result = xata_client.data().query('geocode_cache', {
-                "filter": {
-                    "address": address,
-                }
-                })
-            if cache_result.is_success() and len(cache_result['records']) > 0:
-                data = cache_result['records'][0]
-                existing_results[address] = (
-                    data["latitude"],
-                    data["longitude"],
-                    data["geohash"],
-                    data["zipcode"],
-                    data["formatted_address"]
-                )
-        except Exception as e:
-            logging.error(f"Error fetching cache for address {address}: {e}")
+    # Query all addresses at once
+    try:
+        cache_results = xata_client.data().query('geocode_cache', {
+            "filter": {
+                "$any" : [
+                    {"address": { "$is": a }}
+                    for a in addresses
+                ],
+            },
+            "page": {
+                "size": 1000
+            },
+            "columns": ["address", "latitude", "longitude", "geohash", "zipcode", "formatted_address"]
+        })
+        
+        if not cache_results.is_success():
+            raise Exception(f"Failed to query geocode cache: {cache_results.error_message}")
+
+        # Create a dictionary of existing results
+        existing_results = {
+            record["address"]: (
+                record["latitude"],
+                record["longitude"],
+                record["geohash"],
+                record["zipcode"],
+                record["formatted_address"]
+            )
+            for record in cache_results["records"]
+        }
+    except Exception as e:
+        logging.error(f"Error fetching cache for addresses: {e}")
+        existing_results = {}
 
     addresses_to_geocode = [address for address in addresses if address not in existing_results]
 
@@ -122,6 +93,7 @@ def geocode_addresses_batch(addresses):
                     logging.error(f"Error caching geocode data for address {address}: {e}")
     else:
         logging.debug("All addresses found in the cache")
+
     return existing_results
 
 def fetch_webpage():
@@ -213,10 +185,6 @@ def main(limit):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Scrape a webpage and store the data in Xata.')
     parser.add_argument('--limit', type=int, default=None, help='Limit the number of rows processed for testing')
-    parser.add_argument('--create-schema', action="store_true", help='Create the schema in Xata')
     args = parser.parse_args()
     
-    if args.create_schema:
-        create_schema()
-    else:
-        main(args.limit)
+    main(args.limit)
