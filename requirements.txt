@@ -1,6 +1,5 @@
 beautifulsoup4==4.12.3
 certifi==2024.7.4
-charset-normalizer==3.3.2
 deprecation==2.1.0
 docutils==0.21.2
 geohash2==1.1

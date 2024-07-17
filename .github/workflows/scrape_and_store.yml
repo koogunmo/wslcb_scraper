@@ -16,7 +16,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v2
         with:
-          python-version: "3.8"
+          python-version: "3.12.4"
 
       - name: Install Dependencies
         run: |
@@ -27,5 +27,7 @@ jobs:
         env:
           GEOCODIO_API_KEY: ${{ secrets.GEOCODIO_API_KEY }}
           FAUNADB_SECRET: ${{ secrets.FAUNADB_SECRET }}
+          XATA_API_KEY: ${{ secrets.XATA_API_KEY }}
+          XATA_DB_URL: ${{ secrets.XATA_DB_URL }}
         run: |
           python scraper.py
