@@ -6,81 +6,91 @@ from geocodio import GeocodioClient
 import geohash2
 import argparse
 import logging
-from faunadb import query as q
-from faunadb.client import FaunaClient
+from xata.client import XataClient
+from xata.helpers import to_rfc339
+import hashlib
 
 # Initialize logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Initialize Geocodio client
-api_key = os.getenv('GEOCODIO_API_KEY')  # Use the environment variable for the API key
+api_key = os.getenv('GEOCODIO_API_KEY')
 if not api_key:
     raise ValueError("Geocodio API key not found. Set it as an environment variable 'GEOCODIO_API_KEY'")
 client = GeocodioClient(api_key)
 
-# Initialize FaunaDB client
-fauna_secret = os.getenv('FAUNADB_SECRET')
-if not fauna_secret:
-    raise ValueError("FaunaDB secret key not found. Set it as an environment variable 'FAUNADB_SECRET'")
-fauna_client = FaunaClient(secret=fauna_secret)
+# Initialize Xata client
+xata_api_key = os.getenv('XATA_API_KEY')
+xata_db_url = os.getenv('XATA_DB_URL')
+if not xata_api_key or not xata_db_url:
+    raise ValueError("Xata API key or database URL not found. Set them as environment variables 'XATA_API_KEY' and 'XATA_DB_URL'")
+xata_client = XataClient(api_key=xata_api_key, db_url=xata_db_url)
 
-# Create collections and indexes if they don't exist
-def create_collections_and_indexes():
+def create_schema():
     try:
-        # Create collections
-        fauna_client.query(q.create_collection({"name": "licenses"}))
-        fauna_client.query(q.create_collection({"name": "geocode_cache"}))
-
-        # Create indexes
-        fauna_client.query(q.create_index({
-            "name": "geocode_cache_by_address",
-            "source": q.collection("geocode_cache"),
-            "terms": [{"field": ["data", "address"]}],
-            "unique": True
-        }))
-        fauna_client.query(q.create_index({
-            "name": "licenses_by_license_number_notification_date_license_type",
-            "source": q.collection("licenses"),
-            "terms": [
-                {"field": ["data", "license_number"]},
-                {"field": ["data", "notification_date"]},
-                {"field": ["data", "license_type"]}
-            ],
-            "unique": True
-        }))
-        fauna_client.query(q.create_index({
-            "name": "licenses_by_creation_date",
-            "source": q.collection("licenses"),
-            "values": [
-                {"field": ["ref"]},
-                {"field": ["data", "creation_date"]}
+        # Create 'licenses' table
+        xata_client.tables().create("Licenses", {
+            "columns": [
+                {"name": "notification_date", "type": "datetime"},
+                {"name": "current_business_name", "type": "string"},
+                {"name": "new_business_name", "type": "string"},
+                {"name": "business_location", "type": "string"},
+                {"name": "current_applicants", "type": "string"},
+                {"name": "new_applicants", "type": "string"},
+                {"name": "license_type", "type": "string"},
+                {"name": "application_type", "type": "string"},
+                {"name": "license_number", "type": "string"},
+                {"name": "contact_phone", "type": "string"},
+                {"name": "latitude", "type": "float"},
+                {"name": "longitude", "type": "float"},
+                {"name": "geohash", "type": "string"},
+                {"name": "zipcode", "type": "string"},
+                {"name": "formatted_address", "type": "string"},
+                {"name": "business_name", "type": "string"},
+                {"name": "applicants", "type": "string"}
             ]
-        }))
+        })
+
+        # Create 'geocode_cache' table with 'address' as the primary key
+        xata_client.tables().create("geocode_cache", {
+            "columns": [
+                {"name": "address", "type": "string"},
+                {"name": "latitude", "type": "float"},
+                {"name": "longitude", "type": "float"},
+                {"name": "geohash", "type": "string"},
+                {"name": "zipcode", "type": "string"},
+                {"name": "formatted_address", "type": "string"}
+            ],
+            "primary_key": "address"
+        })
+
+        logging.info("Schema created successfully")
     except Exception as e:
-        logging.error(f"Error creating collections or indexes: {e}")
+        logging.error(f"Error creating schema: {e}")
 
 def geocode_addresses_batch(addresses):
     logging.debug(f"Geocoding {len(addresses)} addresses...")
 
-    # Batch check if addresses already exist in the cache
-    cache_lookup_operations = [q.get(q.match(q.index("geocode_cache_by_address"), address)) for address in addresses]
-
     existing_results = {}
-    try:
-        cache_results = fauna_client.query(q.map_(lambda x: x, cache_lookup_operations))
-        for address, result in zip(addresses, cache_results):
-            if result:
+    for address in addresses:
+        try:
+            cache_result = xata_client.data().query('geocode_cache', {
+                "filter": {
+                    "address": address,
+                }
+                })
+            if cache_result.is_success() and len(cache_result['records']) > 0:
+                data = cache_result['records'][0]
                 existing_results[address] = (
-                    result['data']['latitude'],
-                    result['data']['longitude'],
-                    result['data']['geohash'],
-                    result['data']['zipcode'],
-                    result['data']['formatted_address']
+                    data["latitude"],
+                    data["longitude"],
+                    data["geohash"],
+                    data["zipcode"],
+                    data["formatted_address"]
                 )
-    except Exception as e:
-        logging.error(f"Error checking cache for addresses: {e}")
+        except Exception as e:
+            logging.error(f"Error fetching cache for address {address}: {e}")
 
-    # Addresses to geocode via API
     addresses_to_geocode = [address for address in addresses if address not in existing_results]
 
     if addresses_to_geocode:
@@ -98,17 +108,16 @@ def geocode_addresses_batch(addresses):
 
                 # Store in cache
                 try:
-                    fauna_client.query(q.create(q.collection("geocode_cache"), {
-                        "data": {
-                            "address": address,
-                            "latitude": lat,
-                            "longitude": lng,
-                            "geohash": geohash_code,
-                            "zipcode": zipcode,
-                            "formatted_address": formatted_address,
-                            "creation_date": q.now()
-                        }
-                    }))
+                    res = xata_client.records().upsert("geocode_cache", hash(address), {
+                        "address": address,
+                        "latitude": lat,
+                        "longitude": lng,
+                        "geohash": geohash_code,
+                        "zipcode": zipcode,
+                        "formatted_address": formatted_address
+                    })
+                    if res.is_success() == False:
+                        logging.error(f"Error caching geocode data for address {address}: {res.error_message}")
                 except Exception as e:
                     logging.error(f"Error caching geocode data for address {address}: {e}")
     else:
@@ -139,7 +148,7 @@ def parse_html(html_content):
 def get_notification_date(entry):
     try:
         date_str = entry.get('Notification Date') or entry.get('Approved Date') or entry.get('Discontinued Date')
-        return datetime.strptime(date_str, '%m/%d/%Y').date() if date_str else None
+        return datetime.strptime(date_str, '%m/%d/%Y') if date_str else None
     except Exception as e:
         logging.error(f"Error parsing notification date {date_str}: {e}")
         return None
@@ -149,17 +158,13 @@ def upsert_data(data, geocode_results):
     for entry in data:
         address = entry.get('Business Location') or entry.get('New Business Location')
         lat, lng, geohash_code, zipcode, formatted_address = geocode_results.get(address, (None, None, None, None, None))
-        notification_date = get_notification_date(entry)
+        notification_date = to_rfc339(get_notification_date(entry))
 
-        # Ensure notification_date is a string if it's not None
-        notification_date_str = notification_date.strftime('%Y-%m-%d') if notification_date else None
-
-        # Prepare the document
         license_data = {
-            "notification_date": notification_date_str,  # Use the string format
+            "notification_date": notification_date,
             "current_business_name": entry.get('Current Business Name'),
             "new_business_name": entry.get('New Business Name'),
-            "business_location": entry.get('Business Location') or entry.get('New Business Location'),
+            "business_location": address,
             "current_applicants": entry.get('Current Applicant(s)'),
             "new_applicants": entry.get('New Applicant(s)'),
             "license_type": entry.get('License Type'),
@@ -171,24 +176,29 @@ def upsert_data(data, geocode_results):
             "geohash": geohash_code,
             "zipcode": zipcode,
             "formatted_address": formatted_address,
-            "last_updated_date": q.now(),
-            "creation_date": q.now(),
             "business_name": entry.get('Business Name'),
-            "applicants": entry.get('Applicant(s)'),
+            "applicants": entry.get('Applicant(s)')
         }
-        #logging.debug(license_data)
-        # Upsert in FaunaDB
+
         try:
-            fauna_client.query(q.if_(
-                q.exists(q.match(q.index("licenses_by_license_number_notification_date_license_type"), entry.get('License Number'), notification_date, entry.get('License Type'))),
-                q.update(q.select("ref", q.get(q.match(q.index("licenses_by_license_number_notification_date_license_type"), entry.get('License Number'), notification_date, entry.get('License Type')))), {"data": license_data}),
-                q.create(q.collection("licenses"), {"data": license_data})
-            ))
+            existing_record = xata_client.data().query("licenses", {
+                "filter": {
+                    "$all": [
+                        {"license_number": entry.get('License Number')},
+                        {"notification_date": notification_date},
+                        {"license_type": entry.get('License Type')}
+                    ]
+                }
+            })
+
+            if existing_record["records"]:
+                xata_client.records().update("licenses", existing_record["records"][0]["id"], license_data)
+            else:
+                xata_client.records().insert("licenses", license_data)
         except Exception as e:
-            logging.error(f"Error upserting data for license number {entry.get('License Number')}: {e}. data: {license_data}")
+            logging.error(f"Error upserting data for license number {entry.get('License Number')}: {e}")
 
     logging.debug("Data upsertion completed.")
-
 
 def main(limit):
     html_content = fetch_webpage()
@@ -201,11 +211,12 @@ def main(limit):
     upsert_data(data, geocode_results)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Scrape a webpage and store the data in FaunaDB.')
+    parser = argparse.ArgumentParser(description='Scrape a webpage and store the data in Xata.')
     parser.add_argument('--limit', type=int, default=None, help='Limit the number of rows processed for testing')
-    parser.add_argument('--create-tables', action="store_true", default=None, help='creates tables in database')
+    parser.add_argument('--create-schema', action="store_true", help='Create the schema in Xata')
     args = parser.parse_args()
-    if (args.create_tables):
-        create_collections_and_indexes()
+    
+    if args.create_schema:
+        create_schema()
     else:
         main(args.limit)
